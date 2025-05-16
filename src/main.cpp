@@ -1,584 +1,240 @@
-#include "Arduino.h"
-#include <arrow.h>
-#include <OneWire.h>
-#include <DallasTemperature.h>
-#include <ESP32Servo.h>
-#include <TFT_eSPI.h> // Graphics and font library for ST7735 driver chip
+#include <lvgl.h>
+#include <TFT_eSPI.h>
+#include <Arduino.h>
 #include <SPI.h>
-#include <WiFi.h>
-#include <WiFiClient.h>
-#include <WebServer.h>
-#include <ESPmDNS.h>
-#include <Update.h>
-#include <esp_sleep.h>
-#include <esp_bt_main.h>
-#include "Free_Fonts.h"
-#include "FreeSansBold42pt7b.h"
-#include <kluda.h>
 
-#define GFXFF 1
+// LVGL konfigurācija
+#define LV_CONF_INCLUDE_SIMPLE
+#define LV_USE_MEM_MONITOR 0
+#define LV_DISP_DEF_REFR_PERIOD 30
+#define LV_INDEV_DEF_READ_PERIOD 30
 
-
-
-const char* host = "esp32";
-const char* ssid = "HUAWEI-B525-90C8";
-const char* password = "BTT6F1EA171";
-
-WebServer server(80);
-const char* loginIndex =
- "<form name='loginForm'>"
-    "<table width='20%' bgcolor='A09F9F' align='center'>"
-        "<tr>"
-            "<td colspan=2>"
-                "<center><font size=4><b>ESP32 Login Page</b></font></center>"
-                "<br>"
-            "</td>"
-            "<br>"
-            "<br>"
-        "</tr>"
-        "<tr>"
-             "<td>Username:</td>"
-             "<td><input type='text' size=25 name='userid'><br></td>"
-        "</tr>"
-        "<br>"
-        "<br>"
-        "<tr>"
-            "<td>Password:</td>"
-            "<td><input type='Password' size=25 name='pwd'><br></td>"
-            "<br>"
-            "<br>"
-        "</tr>"
-        "<tr>"
-            "<td><input type='submit' onclick='check(this.form)' value='Login'></td>"
-        "</tr>"
-    "</table>"
-"</form>"
-"<script>"
-    "function check(form)"
-    "{"
-    "if(form.userid.value=='admin' && form.pwd.value=='admin')"
-    "{"
-    "window.open('/serverIndex')"
-    "}"
-    "else"
-    "{"
-    " alert('Error Password or Username')/*displays error message*/"
-    "}"
-    "}"
-"</script>";
-
-/*
- * Server Index Page
- */
-
-  const char* serverIndex =
-  "<script src='https://ajax.googleapis.com/ajax/libs/jquery/3.2.1/jquery.min.js'></script>"
-  "<form method='POST' action='#' enctype='multipart/form-data' id='upload_form'>"
-   "<input type='file' name='update'>"
-        "<input type='submit' value='Update'>"
-    "</form>"
-  "<div id='prg'>progress: 0%</div>"
-  "<script>"
-  "$('form').submit(function(e){"
-  "e.preventDefault();"
-  "var form = $('#upload_form')[0];"
-  "var data = new FormData(form);"
-  " $.ajax({"
-  "url: '/update',"
-  "type: 'POST',"
-  "data: data,"
-  "contentType: false,"
-  "processData:false,"
-  "xhr: function() {"
-  "var xhr = new window.XMLHttpRequest();"
-  "xhr.upload.addEventListener('progress', function(evt) {"
-  "if (evt.lengthComputable) {"
-  "var per = evt.loaded / evt.total;"
-  "$('#prg').html('progress: ' + Math.round(per*100) + '%');"
-  "}"
-  "}, false);"
-  "return xhr;"
-  "},"
-  "success:function(d, s) {"
-  "console.log('success!')"
- "},"
- "error: function (a, b, c) {"
- "}"
- "});"
- "});"
- "</script>";
-
-OneWire oneWire(6);
-DallasTemperature ds(&oneWire);
-DeviceAddress sensor1 = {0x28, 0xA6, 0xE4, 0x49, 0xF6, 0xF2, 0x3C, 0xF};
-
-TFT_eSPI tft = TFT_eSPI();  // Invoke library, pins defined in User_Setup.h
-TFT_eSprite img = TFT_eSprite(&tft);
-TFT_eSprite bckg = TFT_eSprite(&tft);
-TFT_eSprite text = TFT_eSprite(&tft);
-TFT_eSprite text2 = TFT_eSprite(&tft);
-TFT_eSprite text3 = TFT_eSprite(&tft);
-TFT_eSprite text4 = TFT_eSprite(&tft);
+// Pieskāriena konfigurācija
+#define TOUCH_IRQ 7
+#define CAL_X_MIN 200
+#define CAL_X_MAX 3800
+#define CAL_Y_MIN 200
+#define CAL_Y_MAX 3800
+#define TOUCH_THRESHOLD 100
 
 
-float error = 0.0;                  // Temperature compensation error
+// Bufera konfigurācija
+#define BUF_HEIGHT (TFT_HEIGHT/10)
+#define BUF_SIZE (TFT_WIDTH * BUF_HEIGHT)
 
-int x=20;
-// Buzzer setup variables:
-int buzzerPort = 2;               // Buzzer port id
-int buzzerRefillFrequency = 1900; // Buzzer tone frequency for refill alarm
-int buzzerRefillRepeat = 1;       // Number of refill alarm tones
-int buzzerRefillDelay = 1000;     // Delay between refill alarm tones
-int buzzerEndFrequency = 950;     // Buzzer tone frequency for end of fire damper close alarm
-int buzzerEndRepeat = 1;          // Number of tones for end of fire damper close alarm
-int buzzerEndDelay = 200;        // Delay of tone for end of fire damper close alarm
-byte E;
+TFT_eSPI tft = TFT_eSPI();
+static lv_disp_draw_buf_t draw_buf;
+static lv_color_t buf1[BUF_SIZE];
+static lv_color_t buf2[BUF_SIZE];
 
-// Potentiometer variables
-int servoPort = 5;
-int potPort = A3;
-int relayPort = 13;
+// Pieskāriena dati
+uint16_t last_x = 0, last_y = 0;
+bool last_touched = false;
 
-// Device objects - create servo, therocouple, and lcd objects 
-Servo myservo;
+// Filtrēšanas konfigurācija
+#define FILTER_SAMPLES 5
+uint16_t x_history[FILTER_SAMPLES] = {0};
+uint16_t y_history[FILTER_SAMPLES] = {0};
+uint8_t history_index = 0;
 
-// Servo calibration settings
-float servoCalibration = 1.5;  // 1.0 is neutral cal - adjust value so servo arm drives closed damper when damper variable equals 0 (0%)
-float servoOffset = 29;  // offset angle for servo angle adjustment
-float servoAngle = 35;  // adjust value to define total angular travel of servo so that cable drives damper from fully opened to fully closed
+// Displeja atjaunošanas funkcija
+void mans_disp_flush(lv_disp_drv_t *disp, const lv_area_t *area, lv_color_t *color_p) {
+    uint32_t w = (area->x2 - area->x1 + 1);
+    uint32_t h = (area->y2 - area->y1 + 1);
 
+    tft.startWrite();
+    tft.setAddrWindow(area->x1, area->y1, w, h);
+    tft.pushColors(&color_p->full, w * h, true);
+    tft.endWrite();
 
-int temperature = 0;       // initialize temperature variable for C
-int temperatureMin = 50; // under this temperature (38C = 100F), the regulation closes the damper if end of fire conditions are met
-int targetTempC = 0;   // the target temperature as measured by the thermocouple (135 C = 275 F)
-float errP = 0.0;          // initialize the proportional term
-float errD = 0.0;          // initialize the derivative term
-float errI = 0.0;          // initialize the integral term
-float errOld = 0.0;        // initialize term used to capture prior cycle ErrP
-int kP = 0;            // Overall gain coefficient and P coefficient of the PID regulation
-float tauI = 1000;         // Integral time constant (sec/repeat)
-float tauD = 5;            // Derivative time constant (sec/reapeat)
-float kI =  kP/tauI;        // I coefficient of the PID regulation
-float kD = kP/tauD;        // D coefficient of the PID regulation
-
-float refillTrigger = 55000;// refillTrigger used to notify need of a wood refill
-float endTrigger = 85000;  // closeTrigger used to close damper at end of combustion
-
-int pot_raw = 0;
-int pot = 120;
-int oldPot = 0;
-float potMax = 1000.0;   // Potentiometer calibration
-int potRelMax = 100;     // Potentiometer value above which the regulator runs in automatic mode
-
-int difft = 0;
-int angle = 0;
-int damper = 0;
-int oldDamper = 0;
-int diff = 0;
-float maxDamper = 100.0;  // Sets maximum damper setting
-float minDamper = 0.0;    // Sets minimum damper setting
-float zeroDamper = 0.0;   // Sets zero damper setting - note that stove allows some amount of airflow at zero damper
-
-
-
-String messageDamp;    // Initialize message for damper 2
-String messageinfo;    // Initialize message for damper 3
-bool endBuzzer = true;
-bool refillBuzzer = true;
-bool oddLoop = true;
-bool sleep_ = false;
-
-int TempHist[10] = {0, 0, 0, 0, 0, 0, 0, 0, 0, 0}; // Set temperature history array
-
- //Returns 'true' for refilled and temperature climbing or 'false' for temperature falling
-bool WoodFilled(int CurrentTemp) {
-   for (int i = 9; i > 0; i--) {
-     TempHist[i] = TempHist[i-1];
-   }
-   TempHist[0] = CurrentTemp;
-
-   if (float((TempHist[0]+TempHist[1]+TempHist[2]+TempHist[3]+TempHist[4]+TempHist[5])/5) > float((TempHist[6]+TempHist[7]+TempHist[8])+TempHist[9]+TempHist[10]/5)) {
-     return true;
-  }
-   else {
-    return false;
-   }
- }
-
-
-void setup(void) 
-{
-   
-  
-    Serial.begin(115200);  // opens serial port, sets data rate to 9600 bps
-
-     WiFi.begin(ssid, password);
-  Serial.println("");
-
-  // Wait for connection
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(500);
-    Serial.print(".");
-  }
-  Serial.println("");
-  Serial.print("Connected to ");
-  Serial.println(ssid);
-  Serial.print("IP address: ");
-  Serial.println(WiFi.localIP());
-
-  /*use mdns for host name resolution*/
-if (!MDNS.begin(host)) { //http://esp32.local
-    Serial.println("Error setting up MDNS responder!");
-    while (1) {
-      delay(1000);
-    }
-    }
-    Serial.println("mDNS responder started");
-    /*return index page which is stored in serverIndex */
-    server.on("/", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", loginIndex);
-    });
-    server.on("/serverIndex", HTTP_GET, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/html", serverIndex);
-    });
-    /*handling uploading firmware file */
-    server.on("/update", HTTP_POST, []() {
-    server.sendHeader("Connection", "close");
-    server.send(200, "text/plain", (Update.hasError()) ? "FAIL" : "OK");
-    ESP.restart();
-    }, []() {
-    HTTPUpload& upload = server.upload();
-    if (upload.status == UPLOAD_FILE_START) {
-      Serial.printf("Update: %s\n", upload.filename.c_str());
-      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) { //start with max available size
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_WRITE) {
-      /* flashing firmware to ESP*/
-      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
-        Update.printError(Serial);
-      }
-    } else if (upload.status == UPLOAD_FILE_END) {
-      if (Update.end(true)) { //true to set the size to the current progress
-        Serial.printf("Update Success: %u\nRebooting...\n", upload.totalSize);
-      } else {
-        Update.printError(Serial);
-      }
-    }
-    });
-
-  server.begin();
-    
-    analogReadResolution(9);
-      adcAttachPin(15);
-    
-    myservo.attach(5);  // attach servo object to pin 10
-    myservo.write(50); 
-    myservo.detach();    // detach servo object from its pin
-    
-    pinMode(buzzerPort, OUTPUT); // configure buzzer pin as an output
-    pinMode(relayPort, OUTPUT);
-
-    digitalWrite(relayPort, LOW);
-
-    E= ds.getDeviceCount();  
-
-    
-    tft.init();
-    tft.setRotation(3);
-    tft.fillScreen(TFT_BLACK);
-    
-    bckg.createSprite(320, 240);
-    
-    bckg.setSwapBytes(true);
-
-   
-    delay(50);
-    
-   
+    lv_disp_flush_ready(disp);
 }
 
-/// @brief 
+// Pārbauda, vai pieskārieni ir derīgi
+bool ir_derigs_pieskariens(uint16_t x, uint16_t y) {
+    return !(y > (CAL_Y_MAX + TOUCH_THRESHOLD) || (x < TOUCH_THRESHOLD));
+}
+
+// Pieskāriena lasīšanas funkcija
+void mans_pieskariens_read(lv_indev_drv_t *indev_drv, lv_indev_data_t *data) {
+    uint16_t touchX, touchY;
+    bool touched = tft.getTouchRaw(&touchX, &touchY);
+    
+    last_touched = touched && ir_derigs_pieskariens(touchX, touchY);
+    
+    if (!last_touched) {
+        data->state = LV_INDEV_STATE_REL;
+        return;
+    }
+    
+    last_x = constrain(map(touchX, CAL_X_MIN, CAL_X_MAX, TFT_WIDTH, 0), 0, TFT_WIDTH - 1);
+    last_y = constrain(map(touchY, CAL_Y_MIN, CAL_Y_MAX, TFT_HEIGHT, 0), 0, TFT_HEIGHT - 1);
+    
+    x_history[history_index] = last_x;
+    y_history[history_index] = last_y;
+    history_index = (history_index + 1) % FILTER_SAMPLES;
+    
+    data->point.x = last_y;
+    data->point.y = last_x;
+    data->state = LV_INDEV_STATE_PR;
+}
+
+// Filtra funkcija
+uint16_t pielietot_filteri(uint16_t *history) {
+    uint16_t min = history[0], max = history[0];
+    uint32_t sum = history[0];
+    
+    for (uint8_t i = 1; i < FILTER_SAMPLES; i++) {
+        if (history[i] < min) min = history[i];
+        if (history[i] > max) max = history[i];
+        sum += history[i];
+    }
+    
+    return (sum - min - max) / (FILTER_SAMPLES - 2);
+}
+
+// Funkcija, kas atjauno pieskāriena datus
+void atjauninat_pieskariena_display() {
+    static uint16_t prev_x = 0, prev_y = 0;
+    
+    if (last_touched) {
+        uint16_t filtered_x = pielietot_filteri(x_history);
+        uint16_t filtered_y = pielietot_filteri(y_history);
+        
+        if (abs(filtered_x - prev_x) > 1 || abs(filtered_y - prev_y) > 1) {
+            Serial.printf("Touch at: X: %d, Y: %d\n", filtered_y, filtered_x);
+            prev_x = filtered_x;
+            prev_y = filtered_y;
+        }
+    }
+}
+
+
+// Globālie stili
+static lv_style_t style_indic;
+
+// Mainīgie
+
+
+lv_obj_t *blue_bar;    // Zilais stabiņš (0-25°C)
+lv_obj_t *red_bar;     // Sarkanais stabiņš (25-40°C)
+bool red_active = false;
+int skaititajs = 65;  
+
+
+// Atjaunina stabiņu stāvokli
+void update_bars(int temp) {
+    // Vienmēr atjaunina zilo stabiņu
+    lv_bar_set_value(blue_bar, (temp > 30) ? 30 : temp, LV_ANIM_OFF);
+    
+    if(temp > 30) {
+        // Parāda sarkano stabiņu un atjaunina tā vērtību
+        lv_obj_clear_flag(red_bar, LV_OBJ_FLAG_HIDDEN);
+        lv_bar_set_value(red_bar, temp, LV_ANIM_OFF);
+    } else {
+        // Paslēpj sarkano stabiņu
+        lv_obj_add_flag(red_bar, LV_OBJ_FLAG_HIDDEN);
+    }
+}
+
+
+
+void setup() {
+    Serial.begin(115200);
+    Serial.println("Sistēmas inicializācija...");
+    
+    tft.init();
+    tft.setRotation(2);
+    tft.fillScreen(TFT_WHITE);
+    
+    lv_init();
+    lv_disp_draw_buf_init(&draw_buf, buf1, buf2, BUF_SIZE);
+
+    static lv_disp_drv_t disp_drv;
+    lv_disp_drv_init(&disp_drv);
+    disp_drv.hor_res = tft.width();
+    disp_drv.ver_res = tft.height();
+    disp_drv.flush_cb = mans_disp_flush;
+    disp_drv.draw_buf = &draw_buf;
+    lv_disp_drv_register(&disp_drv);
+
+    static lv_indev_drv_t indev_drv;
+    lv_indev_drv_init(&indev_drv);
+    indev_drv.type = LV_INDEV_TYPE_POINTER;
+    indev_drv.read_cb = mans_pieskariens_read;
+    lv_indev_drv_register(&indev_drv);
+
+    lv_obj_set_style_bg_color(lv_scr_act(), lv_color_hex(0xF3F4F3), 0);
+
+    // Taisnstūris ar apmali
+    lv_obj_t * rect = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(rect, 300, 400);
+    lv_obj_align(rect, LV_ALIGN_BOTTOM_MID, 0, -15);
+    lv_obj_set_style_radius(rect, 20, 0);
+    lv_obj_set_style_bg_color(rect, lv_color_hex(0xfcfdfd), 0);
+    lv_obj_set_style_border_width(rect, 2, 0);
+
+// Izveidojam baru
+blue_bar = lv_bar_create(lv_scr_act());
+lv_obj_set_size(blue_bar, 80, 300);
+lv_obj_set_pos(blue_bar, 40, 100);
+lv_bar_set_range(blue_bar, 5, 80);
+
+// Fona krāsa un noapalotie augšējie stūri (10px rādiuss)
+lv_obj_set_style_radius(blue_bar, 40, LV_PART_MAIN); // Noapalot augšējos stūrus
+lv_obj_set_style_clip_corner(blue_bar, true, LV_PART_MAIN); // Ieslēdz noapalošanu
+
+// Indikatora krāsa (zila) un NO noapalotie stūri (0 rādiuss)
+lv_obj_set_style_bg_color(blue_bar, lv_color_hex(0x7DD0F2), LV_PART_INDICATOR);
+lv_obj_set_style_radius(blue_bar, 0, LV_PART_INDICATOR); // Taisns indikators
+    
+    // Sarkanais stabiņš (25-40°C) ar gradientu
+    red_bar = lv_bar_create(lv_scr_act());
+    lv_obj_set_size(red_bar, 80, 175);
+    lv_obj_align(red_bar, LV_ALIGN_LEFT_MID, 40, -20);
+    lv_bar_set_range(red_bar, 30, 85);
+    
+    // Gradienta iestatījumi
+    lv_obj_set_style_bg_opa(red_bar, LV_OPA_COVER, LV_PART_INDICATOR);
+    lv_obj_set_style_bg_color(red_bar, lv_color_hex(0xFFC0C0), LV_PART_INDICATOR);       // Apakšējā krāsa (zila)
+    lv_obj_set_style_bg_grad_color(red_bar, lv_color_hex(0x7DD0F2), LV_PART_INDICATOR);  // Augšējā krāsa (sarkana)
+    lv_obj_set_style_bg_grad_dir(red_bar, LV_GRAD_DIR_VER, LV_PART_INDICATOR);          // Vertikālais gradients
+    
+    lv_obj_set_style_radius(red_bar, 5, LV_PART_INDICATOR);
+    lv_obj_set_style_radius(red_bar, 5, LV_PART_MAIN);
+
+    lv_obj_set_style_bg_opa(red_bar, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_set_style_border_opa(red_bar, LV_OPA_TRANSP, LV_PART_MAIN);
+    lv_obj_add_flag(red_bar, LV_OBJ_FLAG_HIDDEN);
+    
+
+  
+
+    // Lielais aplis
+    lv_obj_t * circle = lv_obj_create(lv_scr_act());
+    lv_obj_set_size(circle, 120, 120);
+    lv_obj_set_pos(circle, 20, 480 - 150);
+    lv_obj_set_style_radius(circle, 60, 0);
+    lv_obj_set_style_bg_color(circle, lv_color_hex(0x7DD0F2), 0);
+    lv_obj_set_style_border_width(circle, 0, 0); // Noņemam apmali
+
+    Serial.println("Sistēma gatava lietošanai!");
+}
+
 void loop() {
-
-
-esp_bluedroid_disable;
-
-esp_sleep_enable_ext0_wakeup(GPIO_NUM_15,0);
-
-server.handleClient();
-  delay(10);
-
-ds.requestTemperatures();
-ds.begin();
-
-pot_raw = analogRead(15); 
-
-    if (pot_raw>=70 && pot_raw<=85)     //down
-    {pot = pot -10;}
+    lv_timer_handler();
     
-     if (pot_raw>=0 &&  pot_raw<=10)     //up
-     {pot = pot +10;}
-   
-    if (pot_raw>=30 && pot_raw<=50)     //left
-      {digitalWrite(relayPort, LOW);}   
-
-    if (pot_raw>=12 && pot_raw<=25)     //right 
-      {
-        digitalWrite(relayPort, HIGH);}
-  
-         
-    if(digitalRead(relayPort)==HIGH)
-      {messageinfo = "VENTILATOR ON    ";}
-      
-    else 
-      {messageinfo = "VENTILATOR OFF";}
+    static uint32_t last_update = 0;
+    if (millis() - last_update >= 100) {
+        atjauninat_pieskariena_display();
+        last_update = millis();
+    }
+    
 
     
-    if (pot_raw>=140 && pot_raw<=180)
-      { ESP.restart(); }
-
-temperature = ds.getTempC(sensor1);          // read thermocouple temp in C
-
- 
-  if (temperature >90)
-    { tone(buzzerPort, buzzerRefillFrequency);
-    delay(buzzerRefillDelay);
-    noTone(buzzerPort);
-    delay(buzzerRefillDelay);}
-           
-  if (pot <= 100) 
-    {targetTempC = 65; 
-      if (temperature > 0 && temperature < 40) {kP = 2;}
-      if (temperature > 41 && temperature < 55) {kP = 4;}
-      if (temperature > 56 && temperature < 60) {kP = 7;}
-      if (temperature > 61 && temperature < 100) {kP = 9;}}       
-  
-  if (pot == 110) {
-      targetTempC = 67; 
-      if (temperature > 0 && temperature < 50) {kP = 2;}
-      if (temperature > 51 && temperature < 55) {kP = 4;}
-      if (temperature > 56 && temperature < 62) {kP = 5;}
-      if (temperature > 63 && temperature < 100) {kP = 9;}}
-       
-  if (pot == 120) {
-      targetTempC = 73; 
-      if (temperature > 0 && temperature < 50) {kP = 2;}
-      if (temperature > 51 && temperature < 55) {kP = 4;}
-      if (temperature > 56 && temperature < 60) {kP = 6;}
-      if (temperature > 61 && temperature < 65) {kP = 7;}
-      if (temperature > 66 && temperature < 100) {kP = 9;}}
-         
-  if (pot == 130) {
-      targetTempC = 75; 
-      if (temperature > 0 && temperature < 50) {kP = 2;}
-      if (temperature > 51 && temperature < 55) {kP = 4;}
-      if (temperature > 56 && temperature < 60) {kP = 6;}
-      if (temperature > 61 && temperature < 65) {kP = 7;}
-      if (temperature > 66 && temperature < 100) {kP = 9;}}
-        
-  if (pot == 140) {
-      targetTempC = 79; 
-      if (temperature > 0 && temperature < 50) {kP = 2;}
-      if (temperature > 51 && temperature < 60) {kP = 4;}
-      if (temperature > 61 && temperature < 68) {kP = 6;}
-      if (temperature > 69 && temperature < 73) {kP = 8;}
-      if (temperature > 76 && temperature < 100) {kP = 9;}}
-      
-
-       
-    if (pot <= potRelMax ) {  
-      // Manual damper regulation mode if potentiometer reads 100% or less
-      errI = 0;  // reset integral term based on user intent for manual control
-      errD = 0;  // reset derivative term based on user intent for manual control
-      endBuzzer = true;  // setting to disable end of fire buzzer
-      refillBuzzer = true;  //setting to disable refill buzzer
-      damper = round(pot * maxDamper / 100);  // scales damper setting according to max setting
-      messageDamp = "Manual";} // set damper output message, manual
+    // Atjaunina stabiņu ar skaitītāja vērtību
+    update_bars(skaititajs);
     
-    else 
-    { if (errI < endTrigger) {
-        // Automatic PID regulation
-        errP = targetTempC - temperature;  // set proportional term
-        errI = errI + errP;                // update integral term
-        errD = errP - errOld;              // update derivative term
-        errOld = errP;
-        WoodFilled(temperature);  // Call function that checks if wood is refilled to update array
-
-        // set damper position and limit damper values to physical constraints
-        damper = kP * errP + kI * errI + kD * errD;
-        if (damper < minDamper) damper = minDamper;
-        if (damper > maxDamper) damper = maxDamper;
-
-        messageDamp = "Auto"; // set damper output message, auto
-
-        //Refill Alarm
-        if (errI > refillTrigger) 
-          { messageDamp = "Fill"; 
-           
-          
-
-        if (WoodFilled(temperature)) {
-            errI = 0;  // reset integral term after wood refill
-           
-            }
-          
-        }
-
-      }
-
-    else {
-        // End of combustion condition for errI >= endTrigger
-
-        messageDamp = "End "; // set damper output message, end
-        
-
-      if (temperature < temperatureMin) {
-          damper = zeroDamper;
-          sleep_ = true;
-          
-
-        }
-
-      if (WoodFilled(temperature)) {
-          errI = 0;  // reset integral term after wood refill
-        }}}
- 
-
-text4.createSprite(130, 40);
-  if (temperature <0)
-    {
-      img.createSprite(200, 200);
-      img.pushImage(0,0,200,200,kluda);
-      text4.setTextColor(TFT_GREEN,TFT_BLACK);
-
-temperature = -1;
-messageDamp = "Error"; 
- 
-  tone(buzzerPort, buzzerRefillFrequency);
-    delay(buzzerRefillDelay);
-    noTone(buzzerPort);
-    delay(buzzerRefillDelay);
-    temperature = -1;  
-    }  
-else
-  {text4.setTextColor(10,TFT_BLACK);}
-
-
-    if (oddLoop) 
-    { messageinfo = "Dmp " + String(damper) + "% Pot " + round(pot);} // set alt damper output message
-
-   text.createSprite(90, 65);
-    text.setTextColor(0xB723,TFT_WHITE);
-
-    text3.createSprite(50, 50);
-    text3.setTextColor(10,TFT_BLACK);
-
-    text2.createSprite(100, 50);
-    text2.setTextColor(10,TFT_BLACK);
-  
-  
-bckg.pushImage(0,0,320,240,arrow);
-
- text.setFreeFont(&FreeSansBold42pt7b);
-text.drawString(String(temperature),0,0,GFXFF);
-text.pushToSprite(&bckg,125,60, TFT_BLACK);
-
-text2.setFreeFont(FF35);
-text2.drawString(String(damper) + " %" ,0,0,GFXFF);
-text2.pushToSprite(&bckg,190,190, TFT_BLACK);
-
-text3.drawString(String(targetTempC) ,0,0,4);
-text3.pushToSprite(&bckg,120,23, TFT_BLACK);
-
-img.pushToSprite(&bckg,90,0, TFT_BLACK);
-
-text4.setFreeFont(FF23);
-text4.drawString(messageDamp,0,0,GFXFF);
-text4.pushToSprite(&bckg,20,188, TFT_BLACK); 
-
-bckg.pushSprite(0,0,TFT_BLACK);
-
-
- text.unloadFont();
-text2.unloadFont();
-text3.unloadFont();
-text3.unloadFont();
-
-text.deleteSprite();
-text2.deleteSprite();
-text3.deleteSprite();
-text4.deleteSprite(); 
-img.deleteSprite();
-
-    // Drive servo and print damper position to the lcd
-diff = damper - oldDamper;
-    
-  if (abs(diff) > 12) {  // move servo only if damper position change is more than 2%
-      if (!oddLoop) {
-        //gfx->println("x");   // print x after damper message to indicate active movement
-      }
-      delay(50);
-      myservo.attach(5);
-      if (diff > 0) {  // action if damper should be moved in the opened direction
-        for (int i = 0; i < diff; i++) {
-          angle = (oldDamper + i + 1) * servoAngle / (maxDamper * servoCalibration) + servoOffset;
-          myservo.write(angle);
-          delay(50);
-        }}
-         
-  if (diff < 0) {  // action if damper should be moved in the closed direction
-        for (int i = 0; i < abs(diff); i++) {
-          angle = (oldDamper - i - 1) * servoAngle / (maxDamper * servoCalibration) + servoOffset;
-          myservo.write(angle);
-          delay(50);
-        }}
-                
-      myservo.detach();
-      oldPot = pot;
-      oldDamper =  damper;}
-  //Serial.print(String(damper));
-
-        // Regulator model data via serial output
-    // Output: tempC, tempF, damper%, damper(calculated), damperP, damperI, damperD, errP, errI, errD
-    //Serial.println(pot_raw);
-    /* 
-    
-        
-  Serial.print(temperature);
-  Serial.print(",");
-  Serial.print(round(damper));
-    Serial.print(tempF(temperature));
-    Serial.print(",");
-    Serial.print(round(damper));
-    Serial.print(",");
-    Serial.print(round(kP*errP + kI*errI + kD+errD));
-    Serial.print(",");
-    Serial.print(round(kP*errP));
-    Serial.print(",");
-    Serial.print(round(kI*errI));
-    Serial.print(",");
-    Serial.print(round(kD*errD));
-    Serial.print(",");  
-    Serial.print(errP);
-    Serial.print(",");
-    Serial.print(errI);
-    Serial.print(",");
-    Serial.print(errD);
-    Serial.print(",");    
-    Serial.println();
- */
-//Serial.print(angle);
-if(sleep_==true)
-  {delay(50);
-    esp_deep_sleep_start();}
-
-    // Toggle oddLoop that controls display message on line 2
-oddLoop = !oddLoop;
-    // Delay between loop cycles
-    delay(20);
-
-      
+    lv_tick_inc(5);
+    delay(5);
 }
